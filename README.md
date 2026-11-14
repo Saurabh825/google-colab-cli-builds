@@ -1,3 +1,3 @@
 # google-colab-cli-builds
 
-Version 10
+Version 11
