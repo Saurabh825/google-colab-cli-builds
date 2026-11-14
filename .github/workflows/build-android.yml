@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "Version to stamp the build with (no leading v)"
+        description: "Version to stamp the build with (blank = auto)"
         required: false
         type: string
         default: ""
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to stamp the build with (no leading v)"
+        description: "Version to stamp the build with (blank = auto)"
         required: false
         type: string
         default: ""
@@ -55,7 +55,7 @@ jobs:
           UPSTREAM_REF: ${{ inputs.upstream-ref || 'main' }}
         run: |
           if [ -n "${INPUT_VERSION}" ]; then
-            VERSION="${INPUT_VERSION}"
+            VERSION="${INPUT_VERSION#v}"
           elif [[ "${UPSTREAM_REF}" == v[0-9]* ]]; then
             VERSION="${UPSTREAM_REF#v}"
           else
@@ -85,6 +85,10 @@ jobs:
           export OPENSSL_DIR="${PREFIX:-/data/data/com.termux/files/usr}"
           echo "ANDROID_API_LEVEL=${ANDROID_API_LEVEL} VERSION=${VERSION}"
 
+          # Termux has no writable /tmp; use its own temp dir.
+          T="${TMPDIR:-/data/data/com.termux/files/usr/tmp}"
+          mkdir -p "${T}"
+
           # Pin official mirrors (pkg picks random, sometimes stale ones).
           SOURCES=/data/data/com.termux/files/usr/etc/apt/sources.list
           for MIRROR in \
@@ -110,34 +114,34 @@ jobs:
 
           # 1. Build maturin once so the isolated build environments
           #    (cryptography, pydantic-core, rpds-py, ...) reuse it.
-          python -m pip wheel maturin --wheel-dir /tmp/buildtools
+          python -m pip wheel maturin --wheel-dir "${T}/buildtools"
 
           # 2. Resolve the full dependency set in a venv that can see the system
           #    pyarrow, so pyarrow is treated as already satisfied (not built).
-          python -m venv --system-site-packages /tmp/resolve
-          /tmp/resolve/bin/pip install --dry-run --quiet \
-            --report /tmp/report.json --find-links /tmp/buildtools .
+          python -m venv --system-site-packages "${T}/resolve"
+          "${T}/resolve/bin/pip" install --dry-run --quiet \
+            --report "${T}/report.json" --find-links "${T}/buildtools" .
 
-          python - <<'PY' > /tmp/reqs.txt
-          import json
-          for item in json.load(open("/tmp/report.json"))["install"]:
+          REPORT="${T}/report.json" python - <<'PY' > "${T}/reqs.txt"
+          import json, os
+          for item in json.load(open(os.environ["REPORT"]))["install"]:
               meta = item["metadata"]
               if meta["name"].lower().replace("_", "-") == "google-colab-cli":
                   continue
               print(meta["name"] + "==" + meta["version"])
           PY
-          cat /tmp/reqs.txt
+          cat "${T}/reqs.txt"
 
           # 3. Build/download every wheel (no dependency resolution), then the CLI.
-          python -m pip wheel --no-deps --find-links /tmp/buildtools \
-            -r /tmp/reqs.txt --wheel-dir /out/wheels
-          python -m pip wheel --no-deps --find-links /tmp/buildtools \
+          python -m pip wheel --no-deps --find-links "${T}/buildtools" \
+            -r "${T}/reqs.txt" --wheel-dir /out/wheels
+          python -m pip wheel --no-deps --find-links "${T}/buildtools" \
             . --wheel-dir /out/wheels
 
           # 4. Smoke test: install from the wheelhouse only and run it.
-          python -m venv --system-site-packages /tmp/venv
-          /tmp/venv/bin/pip install --no-index --find-links /out/wheels google-colab-cli
-          /tmp/venv/bin/colab version
+          python -m venv --system-site-packages "${T}/venv"
+          "${T}/venv/bin/pip" install --no-index --find-links /out/wheels google-colab-cli
+          "${T}/venv/bin/colab" version
           EOF
 
           chmod 755 build-termux.sh
