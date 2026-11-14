@@ -81,8 +81,6 @@ jobs:
               set -euxo pipefail
               VERSION="$1"
 
-              # Set inside the shell: the container env does not reliably
-              # reach processes started via the Termux login shell.
               export ANDROID_API_LEVEL=24
               export SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}"
               export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GOOGLE_COLAB_CLI="${VERSION}"
@@ -90,8 +88,7 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               echo "ANDROID_API_LEVEL=${ANDROID_API_LEVEL} VERSION=${VERSION}"
 
-              # `pkg` picks a random mirror each run, and some are stale (missing
-              # packages such as maturin). Pin official mirrors and use apt-get.
+              # Pin official mirrors (pkg picks random, sometimes stale ones).
               SOURCES=/data/data/com.termux/files/usr/etc/apt/sources.list
               for MIRROR in \
                 https://packages-cf.termux.dev/apt/termux-main \
@@ -116,11 +113,25 @@ jobs:
 
               python -m pip install build
 
-              # uv installs jupyter-kernel-client from googlecolab'"'"'s git fork
-              # ([tool.uv.sources]), but pip ignores that and would use PyPI.
-              python -m pip wheel . \
-                "jupyter-kernel-client @ git+https://github.com/googlecolab/jupyter-kernel-client.git" \
-                --wheel-dir /out/wheels
+              # Upstream uses googlecolab'"'"'s git fork of jupyter-kernel-client via
+              # [tool.uv.sources], which pip ignores. If upstream pins an exact
+              # version, try to build that tag from the fork first and put it in
+              # the wheelhouse; otherwise let pip resolve from PyPI.
+              REQ=$(grep -E "^ *\"jupyter-kernel-client" pyproject.toml | head -n1 | tr -d "\" ,")
+              echo "Upstream requirement: ${REQ}"
+              case "${REQ}" in
+                *==*)
+                  PIN="${REQ#*==}"
+                  FORK=https://github.com/googlecolab/jupyter-kernel-client.git
+                  python -m pip wheel --no-deps --wheel-dir /out/wheels \
+                    "jupyter-kernel-client @ git+${FORK}@v${PIN}" \
+                  || python -m pip wheel --no-deps --wheel-dir /out/wheels \
+                    "jupyter-kernel-client @ git+${FORK}@${PIN}" \
+                  || echo "No fork tag for ${PIN}; falling back to PyPI"
+                  ;;
+              esac
+
+              python -m pip wheel . --find-links /out/wheels --wheel-dir /out/wheels
 
               # Smoke test: install from the wheelhouse only and run it.
               python -m venv /tmp/venv
