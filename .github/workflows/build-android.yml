@@ -74,16 +74,22 @@ jobs:
           ls -la src-repo | head -30   # sanity check: pyproject.toml must be here
 
           docker run --rm \
-            -e SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
-            -e SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GOOGLE_COLAB_CLI="${VERSION}" \
-            -e ANDROID_API_LEVEL=24 \
-            -e CARGO_NET_RETRY=10 \
-            -e DEBIAN_FRONTEND=noninteractive \
             -v "$GITHUB_WORKSPACE/src-repo":/work \
             -v "$GITHUB_WORKSPACE/out":/out \
             termux/termux-docker:aarch64 \
             bash -lc '
               set -euxo pipefail
+              VERSION="$1"
+
+              # Set inside the shell: the container env does not reliably
+              # reach processes started via the Termux login shell.
+              export ANDROID_API_LEVEL=24
+              export SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}"
+              export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GOOGLE_COLAB_CLI="${VERSION}"
+              export CARGO_NET_RETRY=10
+              export DEBIAN_FRONTEND=noninteractive
+              echo "ANDROID_API_LEVEL=${ANDROID_API_LEVEL} VERSION=${VERSION}"
+
               pkg update -y -o Dpkg::Options::=--force-confnew
               pkg upgrade -y -o Dpkg::Options::=--force-confnew
               pkg install -y python git rust clang make binutils pkg-config \
@@ -96,7 +102,6 @@ jobs:
 
               # uv installs jupyter-kernel-client from googlecolab'"'"'s git fork
               # ([tool.uv.sources]), but pip ignores that and would use PyPI.
-              # Pin the fork explicitly so the wheelhouse matches upstream.
               python -m pip wheel . \
                 "jupyter-kernel-client @ git+https://github.com/googlecolab/jupyter-kernel-client.git" \
                 --wheel-dir /out/wheels
@@ -105,7 +110,7 @@ jobs:
               python -m venv /tmp/venv
               /tmp/venv/bin/pip install --no-index --find-links /out/wheels google-colab-cli
               /tmp/venv/bin/colab version
-            '
+            ' bash "${VERSION}"
 
       - name: "Package"
         env:
