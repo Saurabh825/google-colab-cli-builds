@@ -1,0 +1,133 @@
+name: Build Android aarch64
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to stamp the build with (no leading v)"
+        required: false
+        type: string
+        default: ""
+      upstream-ref:
+        description: "Upstream branch/tag of googlecolab/google-colab-cli to build"
+        required: false
+        type: string
+        default: "main"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp the build with (no leading v)"
+        required: false
+        type: string
+        default: ""
+      upstream-ref:
+        description: "Upstream branch/tag of googlecolab/google-colab-cli to build"
+        required: false
+        type: string
+        default: "main"
+  pull_request:
+    paths:
+      - ".github/workflows/build-android.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-aarch64:
+    name: "android aarch64 (termux)"
+    timeout-minutes: 60
+    # Native arm64 runner so the Termux aarch64 image runs without QEMU.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: "Checkout upstream google-colab-cli"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: googlecolab/google-colab-cli
+          ref: ${{ inputs.upstream-ref || 'main' }}
+          path: src-repo
+          persist-credentials: false
+          fetch-depth: 0 # hatch-vcs needs tags
+
+      - name: "Resolve version"
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          UPSTREAM_REF: ${{ inputs.upstream-ref || 'main' }}
+        run: |
+          if [ -n "${INPUT_VERSION}" ]; then
+            VERSION="${INPUT_VERSION}"
+          elif [[ "${UPSTREAM_REF}" == v[0-9]* ]]; then
+            VERSION="${UPSTREAM_REF#v}"
+          else
+            VERSION="0.0.0.dev0+g${GITHUB_SHA::8}"
+          fi
+          echo "Building version: ${VERSION}"
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: "Build wheelhouse in Termux"
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          mkdir -p out
+          # Termux runs as an unprivileged user inside the container.
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          ls -la src-repo | head -30   # sanity check: pyproject.toml must be here
+
+          docker run --rm \
+            -e SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
+            -e SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GOOGLE_COLAB_CLI="${VERSION}" \
+            -e MATURIN_PEP517_ARGS="--compatibility off" \
+            -e CARGO_NET_RETRY=10 \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -v "$GITHUB_WORKSPACE/src-repo":/work \
+            -v "$GITHUB_WORKSPACE/out":/out \
+            termux/termux-docker:aarch64 \
+            bash -lc '
+              set -euxo pipefail
+              ls -la /work
+              pkg update -y -o Dpkg::Options::=--force-confnew
+              pkg upgrade -y -o Dpkg::Options::=--force-confnew
+              pkg install -y python git rust clang make binutils pkg-config \
+                libffi openssl maturin
+
+              git config --global --add safe.directory /work
+              cd /work
+
+              python -m pip install --upgrade pip build
+              # Builds the CLI wheel and every dependency (pydantic-core, the
+              # git dependency, ...) as android/bionic wheels.
+              python -m pip wheel . --wheel-dir /out/wheels
+
+              # Smoke test: install from the wheelhouse only and run it.
+              python -m venv /tmp/venv
+              /tmp/venv/bin/pip install --no-index --find-links /out/wheels google-colab-cli
+              /tmp/venv/bin/colab version
+            '
+
+      - name: "Package"
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          NAME="google-colab-cli-${VERSION}-android-aarch64"
+          mkdir -p "dist/${NAME}"
+          cp -r out/wheels "dist/${NAME}/wheels"
+          cat > "dist/${NAME}/install.sh" <<'EOF'
+          #!/data/data/com.termux/files/usr/bin/sh
+          # Offline installer for Termux (Android aarch64). Requires python >= 3.12.
+          set -eu
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          python -m pip install --no-index --find-links "$DIR/wheels" google-colab-cli
+          echo "Installed. Run: colab --help"
+          EOF
+          chmod +x "dist/${NAME}/install.sh"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+
+      - name: "Upload binary"
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: colab-cli-android-aarch64-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 1
