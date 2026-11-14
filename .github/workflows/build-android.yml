@@ -76,7 +76,7 @@ jobs:
           docker run --rm \
             -e SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
             -e SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GOOGLE_COLAB_CLI="${VERSION}" \
-            -e MATURIN_PEP517_ARGS="--compatibility off" \
+            -e ANDROID_API_LEVEL=24 \
             -e CARGO_NET_RETRY=10 \
             -e DEBIAN_FRONTEND=noninteractive \
             -v "$GITHUB_WORKSPACE/src-repo":/work \
@@ -84,7 +84,6 @@ jobs:
             termux/termux-docker:aarch64 \
             bash -lc '
               set -euxo pipefail
-              ls -la /work
               pkg update -y -o Dpkg::Options::=--force-confnew
               pkg upgrade -y -o Dpkg::Options::=--force-confnew
               pkg install -y python git rust clang make binutils pkg-config \
@@ -93,10 +92,14 @@ jobs:
               git config --global --add safe.directory /work
               cd /work
 
-              python -m pip install --upgrade pip build
-              # Builds the CLI wheel and every dependency (pydantic-core, the
-              # git dependency, ...) as android/bionic wheels.
-              python -m pip wheel . --wheel-dir /out/wheels
+              python -m pip install build
+
+              # uv installs jupyter-kernel-client from googlecolab'"'"'s git fork
+              # ([tool.uv.sources]), but pip ignores that and would use PyPI.
+              # Pin the fork explicitly so the wheelhouse matches upstream.
+              python -m pip wheel . \
+                "jupyter-kernel-client @ git+https://github.com/googlecolab/jupyter-kernel-client.git" \
+                --wheel-dir /out/wheels
 
               # Smoke test: install from the wheelhouse only and run it.
               python -m venv /tmp/venv
