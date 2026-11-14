@@ -116,6 +116,12 @@ jobs:
           #    (cryptography, pydantic-core, rpds-py, ...) reuse it.
           python -m pip wheel maturin --wheel-dir "${T}/buildtools"
 
+          # Android's loader needs extension modules to link libpython explicitly.
+          PYVER="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          LIBDIR="${PREFIX:-/data/data/com.termux/files/usr}/lib"
+          export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-L${LIBDIR} -C link-arg=-lpython${PYVER}"
+          export LDFLAGS="${LDFLAGS:-} -L${LIBDIR} -lpython${PYVER}"
+
           # 2. Resolve the full dependency set in a venv that can see the system
           #    pyarrow, so pyarrow is treated as already satisfied (not built).
           python -m venv --system-site-packages "${T}/resolve"
