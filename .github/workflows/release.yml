@@ -6,24 +6,67 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Tag to release (must exist in this repo and upstream, e.g. v0.1.0)"
-        required: true
+      upstream-ref:
+        description: "Upstream tag/branch to build (blank = latest upstream tag)"
+        required: false
         type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
+  resolve:
+    name: "Resolve upstream ref"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      upstream-ref: ${{ steps.r.outputs.upstream_ref }}
+      release-tag: ${{ steps.r.outputs.release_tag }}
+    steps:
+      - id: r
+        env:
+          INPUT_REF: ${{ inputs.upstream-ref }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          UPSTREAM=https://github.com/googlecolab/google-colab-cli.git
+
+          latest_tag() {
+            git ls-remote --tags --refs --sort=-v:refname "$UPSTREAM" 'v*' \
+              | head -n1 | sed 's|.*refs/tags/||'
+          }
+          tag_exists() {
+            git ls-remote --exit-code --tags --refs "$UPSTREAM" "refs/tags/$1" >/dev/null 2>&1
+          }
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            UPSTREAM_REF="${INPUT_REF:-$(latest_tag)}"
+            RELEASE_TAG="$UPSTREAM_REF"
+          else
+            # Pushed tag, e.g. v0.8.0 or v0.8.0-r2 (rebuild of upstream v0.8.0)
+            RELEASE_TAG="$REF_NAME"
+            UPSTREAM_REF="${REF_NAME%%-r*}"
+            if ! tag_exists "$UPSTREAM_REF"; then
+              echo "::error::Upstream has no tag '$UPSTREAM_REF' (from '$REF_NAME'). Latest upstream tag is $(latest_tag)."
+              exit 1
+            fi
+          fi
+
+          echo "upstream_ref=${UPSTREAM_REF}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building upstream '${UPSTREAM_REF}', releasing as '${RELEASE_TAG}'"
+
   build-android-aarch64:
+    needs: resolve
     uses: ./.github/workflows/build-android.yml
     with:
-      # Builds the upstream tag matching this repo's tag.
-      upstream-ref: ${{ inputs.tag || github.ref_name }}
+      upstream-ref: ${{ needs.resolve.outputs.upstream-ref }}
 
   release:
     name: "Create GitHub release"
-    needs: build-android-aarch64
+    needs: [resolve, build-android-aarch64]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -35,14 +78,23 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: "Create release"
+      - name: "Create or update release"
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.release-tag }}
+          UPSTREAM_REF: ${{ needs.resolve.outputs.upstream-ref }}
         run: |
           ls -la dist
-          gh release create "${TAG}" dist/* \
-            --title "${TAG}" \
-            --generate-notes \
-            --verify-tag
+          NOTES="Android aarch64 (Termux) build of googlecolab/google-colab-cli ${UPSTREAM_REF}.
+
+          Install in Termux: extract the tarball, then run ./install.sh"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" dist/* \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG} (android aarch64)" \
+              --notes "${NOTES}"
+          fi
