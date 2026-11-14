@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-aarch64:
+    uses: ./.github/workflows/build-android.yml
+    with:
+      version: ""
+
+  release:
+    name: "Create GitHub release"
+    needs: build-android-aarch64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # required to create the release
+    steps:
+      - uses: actions/download-artifact@v7 # pin to a SHA like the other actions
+        with:
+          pattern: colab-cli-android-aarch64-*
+          merge-multiple: true
+          path: dist
+
+      - name: "Create release"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist
+          gh release create "${TAG}" dist/* \
+            --title "${TAG}" \
+            --generate-notes \
+            --verify-tag
